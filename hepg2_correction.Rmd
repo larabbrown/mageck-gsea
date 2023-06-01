@@ -1,0 +1,103 @@
+---
+title: "HepG2 Correction"
+author: "Lara Brown"
+date: '2023-03-23'
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, warning=FALSE)
+```
+
+Adjust MAGeCK log fold changes for each gene's HepG2 essentiality.
+
+
+```{r, include=FALSE}
+library(tidyverse)
+library(knitr)
+```
+
+```{r load data, include=FALSE}
+df <- read_csv("mageck-20230306/0223_secretion10K_allMAGECK.csv")
+```
+
+
+```{r, include=FALSE}
+join_and_rename <- function(df){
+  # function that returns starting dataset joined with gene essentiality score, gene expected function, and lfc correction for essentiality score
+  
+  # renaming and wrangling
+  df <- df %>%
+    rename_with(~str_replace_all(.,'\\|', '_')) %>%
+    rename_with(~str_replace_all(.,' ', '_')) %>% 
+    mutate(Achilles_HepG2_essentiality = as.numeric(na_if(Achilles_HepG2_essentiality, "FALSE")))
+
+}
+
+# linear model: fitting log fold change to essentiality score
+# use model residuals as adjusted lfc
+lin_correction_residuals <- function(col_name, df){
+  lm(get(col_name) ~ Achilles_HepG2_essentiality, df, na.action=na.exclude) %>%
+  resid()
+}
+
+```
+
+```{r}
+
+df_hepg2 <- join_and_rename(df)
+
+# get vector of df3 column names and extract the ones that end in _LFC
+# then map lin_correction_residuals over that vector
+lfc_cols <- grep("_LFC", colnames(df_hepg2), value=TRUE) 
+
+residual_df <- lfc_cols %>% 
+  map(., ~lin_correction_residuals(.x, df_hepg2)) %>%
+  map(., ~as.data.frame(.)) %>% 
+  list_cbind()
+
+colnames(residual_df) <- paste(lfc_cols, "residuals", sep="_")
+
+residual_df <- residual_df %>% 
+  mutate(id = pull(df, id)) %>% 
+  relocate(id)
+```
+
+```{r}
+# for help filling in missing values with unadjusted LFCs:
+# https://stackoverflow.com/questions/72500806/coalesce-multiple-pairs-of-columns-by-name
+
+suffix_df_hepg2 <- df_hepg2 %>% 
+  select(id, all_of(lfc_cols)) %>% 
+  rename_at(lfc_cols, function(x) paste0(x, "_initial"))
+
+residual_df <- residual_df %>% 
+  left_join(suffix_df_hepg2, by = c("id"="id")) %>% 
+  pivot_longer(!id, names_to = c("prefix", "suffix"),
+               names_pattern = "^(.*)_(.*)$") %>% 
+  pivot_wider(names_from = suffix, values_from = value) %>%
+  mutate(filled_resids = coalesce(residuals, initial)) %>%
+  select(-c(initial, residuals)) %>% 
+  pivot_wider(names_from = prefix, values_from = filled_resids,
+              names_glue= "{prefix}_residuals")
+```
+
+```{r}
+write_csv(residual_df, "mageck-20230306/hepg2_corrected_lfc.csv")
+```
+
+
+After fitting the negative log fold change to the essentiality scores of each gene in the HEPG2 cell line, we identify the residuals for each gene, and use those as an essentiality-corrected lfc.
+
+```{r}
+filled_in_residuals <- read_csv("mageck-20230306/0223_secretion10K_allMAGECK_adjusted.csv")
+```
+
+```{r}
+filled_in_residuals %>% 
+  group_by(APOA1_LFC_residuals) %>% 
+  summarize(n=n()) %>% 
+  arrange(APOA1_LFC_residuals) %>% 
+  View()
+```
+
